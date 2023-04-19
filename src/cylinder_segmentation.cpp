@@ -64,6 +64,13 @@ cloud_cb (const pcl::PCLPointCloud2ConstPtr& cloud_blob)
   pass.filter (*cloud_filtered);
   std::cerr << "PointCloud after filtering has: " << cloud_filtered->points.size () << " data points." << std::endl;
 
+  //remove points that are higher than 0.5m and lower than 0.1m
+  pass.setInputCloud (cloud_filtered);
+  pass.setFilterFieldName ("y");
+  pass.setFilterLimits (0.1, 0.5);
+  pass.filter (*cloud_filtered);
+  std::cerr << "PointCloud after filtering has: " << cloud_filtered->points.size () << " data points." << std::endl;
+
   // Estimate point normals
   ne.setSearchMethod (tree);
   ne.setInputCloud (cloud_filtered);
@@ -73,10 +80,10 @@ cloud_cb (const pcl::PCLPointCloud2ConstPtr& cloud_blob)
   // Create the segmentation object for the planar model and set all the parameters
   seg.setOptimizeCoefficients (true);
   seg.setModelType (pcl::SACMODEL_NORMAL_PLANE);
-  seg.setNormalDistanceWeight (0.1);
+  seg.setNormalDistanceWeight (0.7);
   seg.setMethodType (pcl::SAC_RANSAC);
-  seg.setMaxIterations (100);
-  seg.setDistanceThreshold (0.03);
+  seg.setMaxIterations (300);
+  seg.setDistanceThreshold (0.001);
   seg.setInputCloud (cloud_filtered);
   seg.setInputNormals (cloud_normals);
   // Obtain the plane inliers and coefficients

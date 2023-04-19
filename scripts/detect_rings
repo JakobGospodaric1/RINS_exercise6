@@ -12,6 +12,11 @@ from cv_bridge import CvBridge, CvBridgeError
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
 
+import message_filters
+from cv_bridge import CvBridge, CvBridgeError
+
+# Initialize the CvBridge class
+bridge = CvBridge()
 
 class The_Ring:
     def __init__(self):
@@ -27,9 +32,17 @@ class The_Ring:
         self.marker_array = MarkerArray()
         self.marker_num = 1
 
-        # Subscribe to the image and/or depth topic
-        self.image_sub = rospy.Subscriber("/camera/rgb/image_raw", Image, self.image_callback)
-        # self.depth_sub = rospy.Subscriber("/camera/depth_registered/image_raw", Image, self.depth_callback)
+        # Subscribe to the image
+        # self.image_sub = rospy.Subscriber("/camera/rgb/image_raw", Image, self.image_callback)
+        # Subscribe to the depth topic
+        # self.depth_sub = rospy.Subscriber("/camera/depth/image_raw", Image, self.depth_callback)
+
+        # Message filering for synchronizing the rgb and depth images
+        rgm_sub = message_filters.Subscriber("/camera/rgb/image_raw", Image)
+        depth_sub = message_filters.Subscriber("/camera/depth/image_raw", Image)
+
+        synchronizer = message_filters.ApproximateTimeSynchronizer([rgm_sub, depth_sub], 100, 0.1)
+        synchronizer.registerCallback(self.find_rings_callback)
 
         # Publiser for the visualization markers
         self.markers_pub = rospy.Publisher('markers', MarkerArray, queue_size=1000)
@@ -186,11 +199,15 @@ class The_Ring:
                 cv2.waitKey(1)
 
     def depth_callback(self,data):
+        # print('I got a new depth image!')
 
         try:
             depth_image = self.bridge.imgmsg_to_cv2(data, "16UC1")
         except CvBridgeError as e:
             print(e)
+
+        # Set the dimensions of the image
+        self.dims = depth_image.shape
 
         # Do the necessairy conversion so we can visuzalize it in OpenCV
         image_1 = depth_image / 65536.0 * 255
@@ -198,9 +215,137 @@ class The_Ring:
 
         image_viz = np.array(image_1, dtype= np.uint8)
 
-        cv2.imshow("Depth window", image_viz)
+        # Do histogram equlization
+        img = cv2.equalizeHist(image_viz)
+
+        # Binarize the image, there are different ways to do it
+        #ret, thresh = cv2.threshold(img, 50, 255, 0)
+        #ret, thresh = cv2.threshold(img, 70, 255, cv2.THRESH_BINARY)
+        thresh = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 15, 25)
+        
+        # Extract contours
+        contours, hierarchy = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+
+        # Fit elipses to all extracted contours
+        elps = []
+        for cnt in contours:
+            #     print cnt
+            #     print cnt.shape
+            if cnt.shape[0] >= 20:
+                ellipse = cv2.fitEllipse(cnt)
+                elps.append(ellipse)
+
+
+        # Find two elipses with same centers
+        candidates = []
+        for n in range(len(elps)):
+            for m in range(n + 1, len(elps)):
+                e1 = elps[n]
+                e2 = elps[m]
+                dist = np.sqrt(((e1[0][0] - e2[0][0]) ** 2 + (e1[0][1] - e2[0][1]) ** 2))
+                #             print dist
+                if dist < 5:
+                    candidates.append((e1,e2))
+
+        print("Processing is done! found", len(candidates), "candidates for rings")
+
+        # Wait for color image
+        try:
+            color_img = rospy.wait_for_message('/camera/rgb/image_raw', Image)
+        except Exception as e:
+            print(e)
+
+        try:
+            color_image = self.bridge.imgmsg_to_cv2(color_img, "bgr8")
+        except CvBridgeError as e:
+            print(e)
+
+        color_img = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
+
+        #
+
+        # Show the image with points
+        for c in candidates:
+            #drawing point where the center of the ring is
+            cv2.circle(image_viz, (int(c[0][0][0]), int(c[0][0][1])), 10, (0, 0, 255), 2)
+
+        cv2.imshow("Depth window",color_img)
         cv2.waitKey(1)
 
+    def find_rings_callback(self, img_msg, depth_msg):
+        try:
+            rgb_image = bridge.imgmsg_to_cv2(img_msg, "passthrough")
+        except CvBridgeError as e:
+            print(e)
+
+        try:
+            depth_image = bridge.imgmsg_to_cv2(depth_msg, "passthrough")
+        except CvBridgeError as e:
+            print(e)
+
+        # Convert the images into a OpenCV (numpy) format
+        try:
+            rgb_image = bridge.imgmsg_to_cv2(img_msg, "passthrough")
+        except CvBridgeError as e:
+            print(e)
+
+        try:
+            depth_image = bridge.imgmsg_to_cv2(depth_msg, "passthrough")
+        except CvBridgeError as e:
+            print(e)
+
+        # # Set tnhe dimensions of the image
+        # self.dims = depth_image.shape
+
+        # Do the necessairy conversion so we can visuzalize it in OpenCV
+        # image_1 = depth_image / 65536.0 * 255
+        # image_1 =image_1/np.max(image_1)*255
+
+        # image_viz = np.array(image_1, dtype= np.uint8)
+
+        # # Do histogram equlization
+        # img = cv2.equalizeHist(image_viz)
+
+        # # Binarize the image, there are different ways to do it
+        # #ret, thresh = cv2.threshold(img, 50, 255, 0)
+        # #ret, thresh = cv2.threshold(img, 70, 255, cv2.THRESH_BINARY)
+        # thresh = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 15, 25)
+
+        # # Extract contours
+        # contours, hierarchy = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+        # # Fit elipses to all extracted contours
+        # elps = []
+        # for cnt in contours:
+        #     #     print cnt
+        #     #     print cnt.shape
+        #     if cnt.shape[0] >= 20:
+        #         ellipse = cv2.fitEllipse(cnt)
+        #         elps.append(ellipse)
+
+
+        # # Find two elipses with same centers
+        # candidates = []
+        # for n in range(len(elps)):
+        #     for m in range(n + 1, len(elps)):
+        #         e1 = elps[n]
+        #         e2 = elps[m]
+        #         dist = np.sqrt(((e1[0][0] - e2[0][0]) ** 2 + (e1[0][1] - e2[0][1]) ** 2))
+        #         #             print dist
+        #         if dist < 5:
+        #             candidates.append((e1,e2))
+
+        # print("Processing is done! found", len(candidates), "candidates for rings")
+
+        # # Show the image with points
+        # for c in candidates:
+        #     #drawing point where the center of the ring is
+        #     cv2.circle(rgb_image, (int(c[0][0][0]), int(c[0][0][1])), 10, (0, 0, 255), 2)
+
+        # Show the image
+        cv2.imshow("Image window", rgb_image)
+        cv2.waitKey(1)
 
 def main():
 
