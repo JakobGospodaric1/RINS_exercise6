@@ -1,0 +1,5 @@
+v enem terminalu zalaufej:
+roslaunch exercise6 final_launch.launch
+
+v drugem pa:
+rosrun exercise6 program.py
