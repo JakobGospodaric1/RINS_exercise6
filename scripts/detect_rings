@@ -18,6 +18,37 @@ from cv_bridge import CvBridge, CvBridgeError
 # Initialize the CvBridge class
 bridge = CvBridge()
 
+def average_depth_in_ellipse_optimized(depth_image, ellipse):
+    height, width = depth_image.shape
+    mask = np.zeros((height, width), dtype=np.uint8)
+
+    center, axes, angle = ellipse
+    center = tuple(map(int, center))
+    axes = tuple(map(int, axes))
+
+    # Check that the ellipse box has non-negative width and height
+    if axes[0] <= 0 or axes[1] <= 0:
+        return 0
+
+    # Check that the thickness is within the valid range
+    thickness = -1  # Filled ellipse
+    max_thickness = cv2.CV_32S - 1  # Maximum thickness allowed by OpenCV
+    thickness = min(thickness, max_thickness)
+
+    # Draw filled ellipse on the mask
+    cv2.ellipse(mask, center, axes, angle, 0, 360, 255, thickness)
+
+    # Create a boolean mask
+    bool_mask = mask.astype(bool)
+
+    # Extract depth values inside the ellipse using the mask
+    depths = depth_image[bool_mask]
+
+    # Calculate the average depth of all non-zero elements
+    avg_depth = np.nanmean(depths)
+
+    return avg_depth
+
 class The_Ring:
     def __init__(self):
         rospy.init_node('image_converter', anonymous=True)
@@ -276,10 +307,10 @@ class The_Ring:
 
     def find_rings_callback(self, img_msg, depth_msg):
         #print timestamp
-        print(img_msg.header.stamp)
+        # print(img_msg.header.stamp)
 
         try:
-            rgb_image = bridge.imgmsg_to_cv2(img_msg, "passthrough")
+            rgb_image = bridge.imgmsg_to_cv2(img_msg, "bgr8")
         except CvBridgeError as e:
             print(e)
 
@@ -291,64 +322,100 @@ class The_Ring:
         if depth_image is None or rgb_image is None:
             return
 
-        # # Set tnhe dimensions of the image
-        # self.dims = depth_image.shape
+        # Set tnhe dimensions of the image
+        self.dims = depth_image.shape
 
-        # # Do the necessairy conversion so we can visuzalize it in OpenCV
-        # image_1 = depth_image / 65536.0 * 255
-        # image_1 =image_1/np.max(image_1)*255
+        # Transform the image to grayscale
+        gray = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2GRAY)
 
-        # image_viz = np.array(image_1, dtype= np.uint8)
+        # Do histogram equlization
+        img = cv2.equalizeHist(gray)
 
-        # # Do histogram equlization
-        # img = cv2.equalizeHist(image_viz)
+        # Binarize the image, there are different ways to do it
+        #ret, thresh = cv2.threshold(img, 50, 255, 0)
+        ret, thresh = cv2.threshold(img, 70, 255, cv2.THRESH_BINARY)
+        # thresh = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 25, 30)
 
-        # # Binarize the image, there are different ways to do it
-        # #ret, thresh = cv2.threshold(img, 50, 255, 0)
-        # #ret, thresh = cv2.threshold(img, 70, 255, cv2.THRESH_BINARY)
-        # thresh = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 15, 25)
+        # Extract contours
+        contours, hierarchy = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 
-        # # Extract contours
-        # contours, hierarchy = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-
-        # # Fit elipses to all extracted contours
-        # elps = []
-        # for cnt in contours:
-        #     #     print cnt
-        #     #     print cnt.shape
-        #     if cnt.shape[0] >= 20:
-        #         ellipse = cv2.fitEllipse(cnt)
-        #         elps.append(ellipse)
+        # Fit elipses to all extracted contours
+        elps = []
+        for cnt in contours:
+            #     print cnt
+            #     print cnt.shape
+            if cnt.shape[0] >= 5:
+                ellipse = cv2.fitEllipse(cnt)
+                elps.append(ellipse)
 
 
-        # # Find two elipses with same centers
-        # candidates = []
-        # for n in range(len(elps)):
-        #     for m in range(n + 1, len(elps)):
-        #         e1 = elps[n]
-        #         e2 = elps[m]
-        #         dist = np.sqrt(((e1[0][0] - e2[0][0]) ** 2 + (e1[0][1] - e2[0][1]) ** 2))
-        #         #             print dist
-        #         if dist < 5:
-        #             candidates.append((e1,e2))
+        # Find two elipses with same centers
+        candidates = []
+        for n in range(len(elps)):
+            for m in range(n + 1, len(elps)):
+                e1 = elps[n]
+                e2 = elps[m]
+                dist = np.sqrt(((e1[0][0] - e2[0][0]) ** 2 + (e1[0][1] - e2[0][1]) ** 2))
+                #             print dist
 
-        # print("Processing is done! found", len(candidates), "candidates for rings")
+                # if e1 or e2 are outside of the image, skip
+                if e1[0][0] < 0 or e1[0][0] > self.dims[1] or e1[0][1] < 0 or e1[0][1] > self.dims[0]:
+                    continue
 
-        # # Show the image with points
-        # for c in candidates:
-        #     #drawing point where the center of the ring is
-        #     cv2.circle(rgb_image, (int(c[0][0][0]), int(c[0][0][1])), 10, (0, 0, 255), 2)
+                # if distance > 5 continue
+                if dist > 1:
+                    continue
 
-        print("-1")
+                # get center depth
+                depth = depth_image[int(e1[0][1]), int(e1[0][0])]
+                #get average depth of the elips e1 and e2
+                depth_e1 = average_depth_in_ellipse_optimized(depth_image, e1)
+                depth_e2 = average_depth_in_ellipse_optimized(depth_image, e2)
+
+                #find closest depth
+                if abs(depth_e1 - depth) < abs(depth_e2 - depth):
+                    avg_depth = depth_e1
+                else:
+                    avg_depth = depth_e2
+
+                # print(depth, avg_depth)
+
+                if np.abs(depth - avg_depth) < 2:
+                    continue
+                
+                candidates.append((e1,e2))
+
+        print("Processing is done! found", len(candidates), "candidates for rings")
+
+        # Show the image with points
+        for c in candidates:
+            # the centers of the ellipses
+            e1 = c[0]
+            e2 = c[1]
+
+            # drawing the ellipses on the image
+            cv2.ellipse(rgb_image, e1, (0, 255, 0), 2)
+            cv2.ellipse(rgb_image, e2, (0, 255, 0), 2)
+
+            size = (e1[1][0]+e1[1][1])/2
+            center = (e1[0][1], e1[0][0])
+
+            x1 = int(center[0] - size / 2)
+            x2 = int(center[0] + size / 2)
+            x_min = x1 if x1>0 else 0
+            x_max = x2 if x2<rgb_image.shape[0] else rgb_image.shape[0]
+
+            y1 = int(center[1] - size / 2)
+            y2 = int(center[1] + size / 2)
+            y_min = y1 if y1 > 0 else 0
+            y_max = y2 if y2 < rgb_image.shape[1] else rgb_image.shape[1]
+
+            # add to markers
+            self.get_pose(e1, float(np.mean(depth_image[x_min:x_max,y_min:y_max]))/1000.0)
 
         # Show the image
-        #get image from computer
-        img = cv2.imread('/home/jakob/Slike/oznake_grb_sv.png', 0)
-        cv2.imshow("Image window", img)
-        print("-2")
-        cv2.waitKey(1)
-
-        print("-3")
+        cv2.imshow("Depth window",rgb_image)
+        cv2.waitKey(50)
 
 def main():
     ring_finder = The_Ring()
