@@ -12,11 +12,10 @@ from cv_bridge import CvBridge, CvBridgeError
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import ColorRGBA
 
+import math
+
 import message_filters
 from cv_bridge import CvBridge, CvBridgeError
-
-# Initialize the CvBridge class
-bridge = CvBridge()
 
 # draw elipse mask
 def draw_ellipse_mask(image, ellipse):
@@ -34,13 +33,8 @@ def draw_ellipse_mask(image, ellipse):
     if axes[0] <= 0 or axes[1] <= 0:
         return None
 
-    # Check that the thickness is within the valid range
-    thickness = -1  # Filled ellipse
-    max_thickness = cv2.CV_32S - 1  # Maximum thickness allowed by OpenCV
-    thickness = min(thickness, max_thickness)
-
     # Draw filled ellipse on the mask
-    cv2.ellipse(mask, center, axes, angle, 0, 360, 255, thickness)
+    cv2.ellipse(mask, ellipse, 255, -1)
 
     return mask
 
@@ -57,7 +51,7 @@ def average_depth_in_ellipse_optimized(depth_image, ellipse1, ellipse2):
     bool_mask2 = mask2.astype(bool)
 
     # do bitwise and
-    bool_mask = np.bitwise_and(bool_mask1, bool_mask2)
+    bool_mask = np.bitwise_xor(bool_mask1, bool_mask2)
 
     # Extract depth values inside the ellipse using the mask
     depths = depth_image[bool_mask]
@@ -80,15 +74,24 @@ def avarage_color_in_ellipse_optimized(rgb_image, ellipse1, ellipse2):
     bool_mask2 = mask2.astype(bool)
 
     # do bitwise and
-    bool_mask = np.bitwise_and(bool_mask1, bool_mask2)
+    bool_mask = np.bitwise_xor(bool_mask1, bool_mask2)
 
-    # Extract depth values inside the ellipse using the mask
-    colors = rgb_image[bool_mask]
+    # get only ring colors
+    new_color_r = rgb_image[:, :, 0] * bool_mask
+    new_color_g = rgb_image[:, :, 1] * bool_mask
+    new_color_b = rgb_image[:, :, 2] * bool_mask
 
-    # Calculate the average color for each channel
-    avg_color = np.nanmean(colors, axis=0)
+    #new_color = np.dstack((new_color_r, new_color_g, new_color_b))
+    vals_greater_than_zero = (bool_mask > 0).sum()
+    
+    # avreage color
+    r = new_color_r.sum() / vals_greater_than_zero
+    g = new_color_g.sum() / vals_greater_than_zero
+    b = new_color_b.sum() / vals_greater_than_zero
 
-    return avg_color
+    color = np.array([b, g, r])
+    
+    return color
 
 class The_Ring:
     def __init__(self):
@@ -125,7 +128,7 @@ class The_Ring:
 
         # cv2.destroyAllWindows()
 
-    def get_pose(self,e,dist, avg_color):
+    def get_pose(self,e,dist, avg_color, stamp):
         # Calculate the position of the detected ellipse
 
         k_f = 525 # kinect focal length in pixels
@@ -152,11 +155,16 @@ class The_Ring:
         point_s.point.y = 0
         point_s.point.z = x
         point_s.header.frame_id = "camera_rgb_optical_frame"
-        point_s.header.stamp = rospy.Time(0)
+        point_s.header.stamp = stamp
 
         # Get the point in the "map" coordinate system
         try:
             point_world = self.tf_buf.transform(point_s, "map")
+
+            #if point contains NaN or Inf, return None
+            if np.isnan(point_world.point.x) or np.isnan(point_world.point.y) or np.isnan(point_world.point.z) or \
+                    np.isinf(point_world.point.x) or np.isinf(point_world.point.y) or np.isinf(point_world.point.z):
+                return None
 
             # Create a Pose object with the same position
             pose = Pose()
@@ -178,7 +186,7 @@ class The_Ring:
             marker.type = Marker.CUBE
             marker.action = Marker.ADD
             marker.frame_locked = False
-            marker.lifetime = rospy.Duration.from_sec(10)
+            # marker.lifetime = rospy.Duration.from_sec(10)
             marker.id = self.marker_num
             marker.scale = Vector3(0.1, 0.1, 0.1)
             marker.color = ColorRGBA(avg_color[0], avg_color[1], avg_color[2], 1)
@@ -222,12 +230,12 @@ class The_Ring:
         # print(img_msg.header.stamp)
 
         try:
-            rgb_image = bridge.imgmsg_to_cv2(img_msg, "bgr8")
+            rgb_image = self.bridge.imgmsg_to_cv2(img_msg, "bgr8")
         except CvBridgeError as e:
             print(e)
 
         try:
-            depth_image = bridge.imgmsg_to_cv2(depth_msg, "passthrough")
+            depth_image = self.bridge.imgmsg_to_cv2(depth_msg, "passthrough")
         except CvBridgeError as e:
             print(e)
 
@@ -237,26 +245,54 @@ class The_Ring:
         # Set tnhe dimensions of the image
         self.dims = depth_image.shape
 
-        # Transform the image to grayscale
-        gray = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2GRAY)
+
+        # # Transform the image to grayscale
+        img = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2GRAY)
+
+        # where depth is the farthest, set img to 0
+        img[np.isnan(depth_image)] = -1
 
         # Do histogram equlization
-        img = cv2.equalizeHist(gray)
+        img = cv2.equalizeHist(img)
+
+        #view image
+        cv2.imshow("img", img)
+        cv2.waitKey(1)
 
         # Binarize the image, there are different ways to do it
         #ret, thresh = cv2.threshold(img, 50, 255, 0)
-        ret, thresh = cv2.threshold(img, 70, 255, cv2.THRESH_BINARY)
-        # thresh = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 25, 30)
+        # ret, thresh = cv2.threshold(img, 70, 255, cv2.THRESH_BINARY)
+        thresh = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 25, 30) 
 
-        # Extract contours
-        contours, hierarchy = cv2.findContours(thresh, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        contours, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+        # # mask bottom part of image
+        # masked_img = np.copy(rgb_image)
+        # masked_img[rgb_image.shape[0]//2:rgb_image.shape[0], :, :] = 0
+
+        # thresh_x = cv2.adaptiveThreshold(masked_img[:,:,0], 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 25, 40)
+        # thresh_y = cv2.adaptiveThreshold(masked_img[:,:,1], 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 25, 40)
+        # thresh_z = cv2.adaptiveThreshold(masked_img[:,:,2], 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 25, 40)
+
+        # # Extract contours
+        # contours_x, hierarchy = cv2.findContours(thresh_x, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        # contours_y, hierarchy = cv2.findContours(thresh_y, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        # contours_z, hierarchy = cv2.findContours(thresh_z, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+        # # find the with most contours
+        # if len(contours_x) > len(contours_y) and len(contours_x) > len(contours_z):
+        #     contours = contours_x
+        # elif len(contours_y) > len(contours_x) and len(contours_y) > len(contours_z):
+        #     contours = contours_y
+        # else:
+        #     contours = contours_z
 
         # Fit elipses to all extracted contours
         elps = []
         for cnt in contours:
             #     print cnt
             #     print cnt.shape
-            if cnt.shape[0] >= 5:
+            if cnt.shape[0] >= 50:
                 ellipse = cv2.fitEllipse(cnt)
                 elps.append(ellipse)
 
@@ -275,7 +311,7 @@ class The_Ring:
                     continue
 
                 # if distance > 5 continue
-                if dist > 1:
+                if dist > 0.5:
                     continue
 
                 # get center depth
@@ -291,7 +327,7 @@ class The_Ring:
 
                 # print(depth, avg_depth)
 
-                if np.abs(depth - avg_depth) < 2:
+                if depth - avg_depth < 2:
                     continue
                 
                 candidates.append((e1,e2))
@@ -304,15 +340,15 @@ class The_Ring:
             e1 = c[0]
             e2 = c[1]
 
-            # drawing the ellipses on the image
-            cv2.ellipse(rgb_image, e1, (0, 255, 0), 2)
-            cv2.ellipse(rgb_image, e2, (0, 255, 0), 2)
-
             # add to markers
             avg_depth = average_depth_in_ellipse_optimized(depth_image, e1, e2)
             avg_color = avarage_color_in_ellipse_optimized(rgb_image, e1, e2)
             avg_color = (avg_color[0]/255, avg_color[1]/255, avg_color[2]/255)
-            self.get_pose(e1, avg_depth, avg_color)
+            self.get_pose(e1, avg_depth, avg_color, img_msg.header.stamp)
+
+            # drawing the ellipses on the image
+            cv2.ellipse(rgb_image, e1, (0, 255, 0), 2)
+            cv2.ellipse(rgb_image, e2, (0, 255, 0), 2)
 
         # Show the image
         cv2.imshow("Depth window",rgb_image)
